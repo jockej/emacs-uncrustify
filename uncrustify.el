@@ -35,7 +35,7 @@
 
 (defvar uncrustify-files-regexp nil
   "Regexp to determine which files uncrustify will run on. A common example
-  would be: \"*.[ch]\".")
+  would be: \".*\\\\.[ch]\".")
 
 (defun uncrustify--sentinel (proc event)
   ""
