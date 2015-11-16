@@ -30,8 +30,6 @@
 (defconst uncrustify-pop-to-check-buffer t
   "Pop to the check buffer when running a check.")
 
-(defconst uncrustify--prefix "uncrustify:")
-
 (defvar uncrustify-config-file nil
   "The config file to be passed to uncrustify.")
 
@@ -41,42 +39,47 @@
 
 (defun uncrustify--sentinel (proc event)
   ""
-  (when (string= event "finished\n")
-    (let ((buf (buffer-name (process-buffer proc))))
-      (when buf
-        (with-current-buffer buf
-          (insert (format "%s: " (process-name proc)))
-          (if (= (process-exit-status proc) 0)
-              (insert "PASS\n")
-            (let ((beg (point)))
-              (insert "FAIL")
-              (put-text-property beg (point) 'face 'warning)
-              (insert "\n"))))))))
+  (with-current-buffer (get-buffer-create uncrustify-check-buffer)
+    (insert (format "%s: " (process-name proc)))
+    (cond ((= (process-exit-status proc) 0)
+           (insert "PASS\n"))
+          ((= (process-exit-status proc) 1)
+           (let ((beg (point)))
+             (insert "FAIL")
+             (put-text-property beg (point) 'face 'warning)
+             (insert "\n")))
+          (t (insert "ERROR\n")))))
             
 
-(defun uncrustify--uncrustify-file (file &optional only-check)
+(defun uncrustify--file-internal (file only-check)
   "Run uncrustify on FILE. With optional argument ONLY-CHECK run uncrustify with
   argument --check."
-  (let* ((procname (format "%s%s" uncrustify--prefix
-                          file))
-        (prog (or uncrustify-program (executable-find "uncrustify")))
-        (proc (start-process procname uncrustify-process-output-buffer
-                             prog "-c" uncrustify-config-file
-                             (if only-check "--check" "--no-backup")
-                             "-f" file)))
+  (unless uncrustify-config-file (error "uncrustify-config-file not set"))
+  (let ((prog (or uncrustify-program (executable-find "uncrustify")
+                   (error "Uncrustify not found")))
+        (proc (if only-check
+                  (start-process file uncrustify-process-output-buffer
+                                 prog "-c" uncrustify-config-file "--check" "-f" file)
+                (start-process file uncrustify-process-output-buffer
+                               prog "-c" uncrustify-config-file "--no-backup" file))))
     (when only-check
-      (set-process-sentinel proc uncrustify--sentinel))))
+      (set-process-sentinel proc 'uncrustify--sentinel))))
+
 
 (defun uncrustify-region (start end &optional only-check)
   (interactive "r\nP")
-  (let ((cmd
-         (format "%s -c %s %s"
-                 uncrustify-program
-                 uncrustify-config-file
-                 (if only-check "--check" "--no-backup"))))
-    (shell-command-on-region start end cmd
-                             uncrustify-process-output-buffer
-                             only-check)))
+  (let* ((prog (or uncrustify-program (executable-find "uncrustify")
+                   (error "Uncrustify not found")))
+         (exit-status 
+          (call-process-region start end prog (not only-check)
+                               (if only-check uncrustify-process-output-buffer
+                                 t) nil
+                                 (if only-check "--check" "-q")
+                                 "-c" uncrustify-config-file)))
+    (when only-check
+      (cond ((= exit-status 0) (message "PASS"))
+            ((= exit-status 1) (message "FAIL"))
+            (t (error "Unknown exit status %d" exit-status))))))
 
 
 (defun uncrustify-defun (&optional only-check)
@@ -85,31 +88,38 @@
 
   )
 
+(defmacro uncrustify--check-header (place)
+  " " nil
+  `(with-current-buffer (get-buffer-create uncrustify-check-buffer)
+     (insert (format "[%s] Uncrustifying %s\n"
+                     (substring (current-time-string) 4 -5) ,place))))
+
 (defun uncrustify-directory (dir &optional only-check)
   "Uncrustify all files matching `uncrustify-files-regexp' recursively, starting
   from DIR."
   (interactive "DDirectory: \nP")
+  (unless uncrustify-config-file (error "uncrustify-config-file not set"))
+  (unless uncrustify-files-regexp (error "uncrustify-files-regexp not set"))
+  (when only-check (uncrustify--check-header dir))
   (let ((files
-         (find-lisp-find-files dir uncrustify-files-regexp))
-        (subdirs
-         (find-lisp-find-dired-subdirectories dir)))
-    (mapc
-     (lambda (file) (uncrustify--uncrustify-file file only-check)) files)
-    (mapc
-     (lambda (subdir) uncrustify-directory subdir only-check) subdirs)))
+         (find-lisp-find-files dir uncrustify-files-regexp)))
+    (mapc (lambda (file) (uncrustify--file-internal file only-check)) files))
+  (when (and uncrustify-pop-to-check-buffer only-check)
+    (pop-to-buffer uncrustify-check-buffer)))
 
 
 (defun uncrustify-project (&optional only-check)
   "Uncrustify all files matching `uncrustify-files-regexp' recursively starting
   from `vc-root-dir'."
   (interactive "P")
-  
+  (let ((root 
+  (uncrustify-directory 
   )
-
 
 (defun uncrustify-file (file &optional only-check)
   "Uncrustify a single file."
   (interactive "ffile: \nP")
-
-  )
+  (uncrustify--file-internal file only-check)
+  (when (and uncrustify-pop-to-check-buffer only-check)
+    (pop-to-buffer uncrustify-check-buffer)))
   
