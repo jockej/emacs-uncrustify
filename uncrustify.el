@@ -17,21 +17,41 @@
 
 (require 'find-lisp)
 
-(defconst uncrustify-program nil
+(defgroup uncrustify nil
+  "Customization group for the uncrustify package."
+  :version "24.5"
+  :package-version '(uncrustify . "0.1"))
+
+
+(defcustom uncrustify-program "uncrustify"
   "The uncrustify program. If `nil' use the value (executable-find
-  \"uncrustify\").")
+  \"uncrustify\")."
+  :type '(string))
 
 
-(defconst uncrustify-process-output-buffer "*uncrustify*"
-  "The name of the buffer where uncrustify should print its output.")
+(defcustom uncrustify-process-output-buffer "*uncrustify*"
+  "The name of the buffer where uncrustify should print its output."
+  :type '(string))
 
 
-(defconst uncrustify-check-buffer "*uncrustify-check*"
-  "The name of the buffer where uncrustify should print the result of checks.")
+(defcustom uncrustify-check-buffer "*uncrustify-check*"
+  "The name of the buffer where uncrustify should print the result of checks."
+  :type '(string))
 
 
-(defconst uncrustify-pop-to-check-buffer t
-  "Pop to the check buffer when running a check.")
+(defcustom uncrustify-pop-to-check-buffer t
+  "Pop to the check buffer when running a check."
+  :type '(boolean))
+
+
+(defcustom uncrustify-only-show-failures nil
+  "Only show failed files in the check buffer."
+  :type '(boolean))
+
+
+(defcustom uncrustify-clear-buffer-each-run t
+  "Clear the check buffer before each new run."
+  :type '(boolean))
 
 
 (defvar uncrustify-config-file nil
@@ -43,62 +63,76 @@
   would be: \".*\\\\.[ch]\".")
 
 
+(defmacro uncrustify--with-check-buffer (&rest body)
+  "Run BODY in `uncrustify-check-buffer', create it if it doesn't exist."
+  nil
+  `(with-current-buffer (get-buffer-create uncrustify-check-buffer)
+     (unless (eq major-mode 'uncrustify-check-mode)
+       (uncrustify-check-mode))
+     (goto-char (point-max))
+     (beginning-of-line)
+     (read-only-mode -1)
+     ,@body
+     (read-only-mode 1)))
+
+
 (defun uncrustify--button-action (button)
   "Action to take when a button has been pressed in the uncrustify-check-buffer.
   Opens the file in the other window."
   (let* ((start (button-start button))
          (end (button-end button))
          (fname (buffer-substring-no-properties start end)))
-    (find-file fname)))
+    (find-file-other-window fname)))
 
 
 (defun uncrustify--sentinel (proc event)
-  ""
-  (with-current-buffer (get-buffer-create uncrustify-check-buffer)
-    (beginning-of-line)
-    (let ((bol (point)))
-      (insert (format "%s: " (process-name proc)))
-      (cond ((= (process-exit-status proc) 0)
-             (insert "PASS\n"))
-            ((= (process-exit-status proc) 1)
-             (let* ((beg (point))
-                    (eof (- beg 2)))
-               (insert "FAIL")
-               (put-text-property beg (point) 'face 'warning)
-               (make-button bol eof
-                            'action 'uncrustify--button-action
-                            'follow-link t
-                            'help-echo "mouse-2, RET: Visit file")
-               (end-of-line)
-               (insert "\n")))
-            (t (insert "ERROR\n"))))))
+  "Inserts the result of an uncrustify run in the check buffer."
+  (uncrustify--with-check-buffer
+   (let ((bol (point)))
+     (insert (format "%s: " (process-name proc)))
+     (cond ((= (process-exit-status proc) 0)
+            (unless uncrustify-only-show-failures
+              (insert "PASS\n")))
+           ((= (process-exit-status proc) 1)
+            (let* ((beg (point))
+                   (eof (- beg 2)))
+              (insert "FAIL")
+              (put-text-property beg (point) 'face 'warning)
+              (make-button bol eof
+                           'action 'uncrustify--button-action
+                           'follow-link t
+                           'help-echo "mouse-2, RET: Visit file")
+              (end-of-line)
+              (insert "\n")))
+           (t (insert "ERROR\n"))))))
 
 
 (defun uncrustify--file-internal (file only-check)
   "Run uncrustify on FILE. With optional argument ONLY-CHECK run uncrustify with
   argument --check."
   (unless uncrustify-config-file (error "uncrustify-config-file not set"))
-  (let* ((prog (or uncrustify-program (executable-find "uncrustify")
-                   (error "Uncrustify not found")))
-         (proc (if only-check
-                   (start-process file uncrustify-process-output-buffer
-                                  prog "-c" uncrustify-config-file "--check" "-f" file)
-                 (start-process file uncrustify-process-output-buffer
-                                prog "-c" uncrustify-config-file "--no-backup" file))))
+  (let ((proc (if only-check
+                  (start-process file uncrustify-process-output-buffer
+                                 uncrustify-program
+                                 "-c" uncrustify-config-file "--check" "-f" file)
+                (start-process file uncrustify-process-output-buffer
+                               uncrustify-program
+                               "-c" uncrustify-config-file "--no-backup" file))))
     (when only-check
       (set-process-sentinel proc 'uncrustify--sentinel))))
 
 
 (defun uncrustify-region (start end &optional only-check)
+  "Run uncrustify on the current region.
+
+With non-nil prefix argument, only check, do not overwrite."
   (interactive "r\nP")
-  (let* ((prog (or uncrustify-program (executable-find "uncrustify")
-                   (error "Uncrustify not found")))
-         (exit-status
-          (call-process-region start end prog (not only-check)
-                               (if only-check uncrustify-process-output-buffer
-                                 t) nil
-                                 (if only-check "--check" "-q")
-                                 "-c" uncrustify-config-file)))
+  (let ((exit-status
+         (call-process-region start end uncrustify-program (not only-check)
+                              (if only-check uncrustify-process-output-buffer
+                                t) nil
+                                (if only-check "--check" "-q")
+                                "-c" uncrustify-config-file)))
     (when only-check
       (cond ((= exit-status 0) (message "PASS"))
             ((= exit-status 1) (message "FAIL"))
@@ -106,22 +140,32 @@
 
 
 (defun uncrustify-defun (&optional only-check)
-  "Uncrustify the current defun."
+  "Uncrustify the current defun.
+
+With non-nil prefix argument, only check, do not overwrite."
   (interactive "P")
-  (let ((start (beginning-of-defun))
-        (end (end-of-defun)))
-    (uncrustify-region start end only-check)))
+  (save-excursion
+    (let ((start (progn (beginning-of-defun) (point)))
+          (end (progn (end-of-defun) (point))))
+      (uncrustify-region start end only-check))))
 
 
 (defmacro uncrustify--check-header (place)
-  " " nil
-  `(with-current-buffer (get-buffer-create uncrustify-check-buffer)
-     (insert (format "\n\n[%s] Uncrustifying %s\n"
-                     (substring (current-time-string) 4 -5) ,place))))
+  "Insert a header in the check buffer. If `uncrustify-clear-buffer-each-run' is
+non-nil, clear the buffer first."
+  nil
+  `(uncrustify--with-check-buffer
+    (when uncrustify-clear-buffer-each-run
+      (delete-region (point-min) (point-max)))
+    (insert (format "\n[%s] Uncrustifying %s\n"
+                    (substring (current-time-string) 4 -5) ,place))))
+
 
 (defun uncrustify-directory (dir &optional only-check)
   "Uncrustify all files matching `uncrustify-files-regexp' recursively, starting
-  from DIR."
+  from DIR.
+
+With non-nil prefix argument, only check, do not overwrite."
   (interactive "DDirectory: \nP")
   (unless uncrustify-config-file (error "uncrustify-config-file not set"))
   (unless uncrustify-files-regexp (error "uncrustify-files-regexp not set"))
@@ -135,7 +179,9 @@
 
 (defun uncrustify-project (&optional only-check)
   "Uncrustify all files matching `uncrustify-files-regexp' recursively starting
-  from `vc-root-dir'."
+  from `projectile-project-root'.
+
+With non-nil prefix argument, only check, do not overwrite."
   (interactive "P")
   (unless (fboundp 'projectile-mode)
     (error "This function requires projectile to be active"))
@@ -145,9 +191,53 @@
 
 
 (defun uncrustify-file (file &optional only-check)
-  "Uncrustify a single file."
+  "Uncrustify a single file.
+
+With non-nil prefix argument, only check, do not overwrite."
   (interactive "ffile: \nP")
   (when only-check (uncrustify--check-header file))
   (uncrustify--file-internal file only-check)
   (when (and uncrustify-pop-to-check-buffer only-check)
     (pop-to-buffer uncrustify-check-buffer)))
+
+
+(defmacro uncrustify--with-unlocked-buffer (&rest body)
+  "Run BODY in the current buffer (which is assumed to be the uncrustify check
+  buffer) with read only mode disabled. Puts point at `point-max'."
+  nil
+  `(progn
+     (read-only-mode -1)
+     ,@body
+     (read-only-mode 1)
+     (goto-char (point-max))))
+
+
+(defun uncrustify--xpunge-passed ()
+  "Remove all files that passed."
+  (interactive)
+  (uncrustify--with-unlocked-buffer
+   (goto-char (point-min))
+   (let ((search-upper-case t))
+     (delete-matching-lines ".*: PASS$"))))
+
+
+(defun uncrustify--rerun-file ()
+  "Re-run uncrustify on the file at point, temporarily binding
+`uncrustify-clear-buffer-each-run to nil and with ONLY-CHECK non-nil."
+  (interactive)
+  (let ((uncrustify-clear-buffer-each-run nil)
+        ;; Have to remove the final ':'
+        (file (substring (thing-at-point 'filename t) 0 -1)))
+    (if file (uncrustify-file file t)
+      (user-error "No filename at point"))))
+
+
+(define-derived-mode uncrustify-check-mode fundamental-mode
+  "Uncrustify-Check"
+  "A major mode for the `uncrustify-check-buffer'."
+  :group 'uncrustify
+  (define-key uncrustify-check-mode-map "n" 'next-line)
+  (define-key uncrustify-check-mode-map "p" 'previous-line)
+  (define-key uncrustify-check-mode-map "r" 'uncrustify--rerun-file)
+  (define-key uncrustify-check-mode-map "q" 'bury-buffer)
+  (define-key uncrustify-check-mode-map "x" 'uncrustify--xpunge-passed))
