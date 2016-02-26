@@ -55,7 +55,9 @@
 
 
 (defvar uncrustify-config-file nil
-  "The config file to be passed to uncrustify.")
+  "The config file to be passed to uncrustify. Must be a full path, as
+  uncrustify seems to do no expansion. So for example \"~/uncrustify.cfg\" will
+  _not_ work. Instead use `expand-file-name'.")
 
 
 (defvar uncrustify-files-regexp nil
@@ -87,8 +89,6 @@
 
 (defun uncrustify--sentinel (proc event)
   "Inserts the result of an uncrustify run in the check buffer."
-  (uncrustify--with-check-buffer
-   (let ((bol (point)))
      (insert (format "%s: " (process-name proc)))
      (cond ((= (process-exit-status proc) 0)
             (unless uncrustify-only-show-failures
@@ -107,7 +107,7 @@
            (t (insert "ERROR\n"))))))
 
 
-(defun uncrustify--file-internal (file only-check)
+(defun uncrustify--file-internal-async (file only-check)
   "Run uncrustify on FILE. With optional argument ONLY-CHECK run uncrustify with
   argument --check."
   (unless uncrustify-config-file (error "uncrustify-config-file not set"))
@@ -122,11 +122,29 @@
       (set-process-sentinel proc 'uncrustify--sentinel))))
 
 
+(defun uncrustify-file (file &optional only-check)
+  "Uncrustify a single file.
+
+With non-nil prefix argument, only check, do not overwrite."
+  (interactive "ffile: \nP")
+  (unless uncrustify-config-file (error "uncrustify-config-file not set"))
+  (if only-check
+      (let ((exit-status
+             (call-process uncrustify-program nil nil nil
+                           "-c" uncrustify-config-file "--check" "-f" file)))
+        (cond ((= exit-status 0) (message "PASS"))
+              ((= exit-status 1) (message "FAIL"))
+              (t (error "Unknown exit status %d" exit-status))))
+    (call-process uncrustify-program nil nil nil                               
+                  "-c" uncrustify-config-file "--no-backup" file)))
+
+
 (defun uncrustify-region (start end &optional only-check)
   "Run uncrustify on the current region.
 
 With non-nil prefix argument, only check, do not overwrite."
   (interactive "r\nP")
+  (unless uncrustify-config-file (error "uncrustify-config-file not set"))  
   (let ((exit-status
          (call-process-region start end uncrustify-program (not only-check)
                               (if only-check uncrustify-process-output-buffer
@@ -150,15 +168,10 @@ With non-nil prefix argument, only check, do not overwrite."
       (uncrustify-region start end only-check))))
 
 
-(defmacro uncrustify--check-header (place)
-  "Insert a header in the check buffer. If `uncrustify-clear-buffer-each-run' is
-non-nil, clear the buffer first."
-  nil
-  `(uncrustify--with-check-buffer
-    (when uncrustify-clear-buffer-each-run
-      (delete-region (point-min) (point-max)))
-    (insert (format "\n[%s] Uncrustifying %s\n"
-                    (substring (current-time-string) 4 -5) ,place))))
+(defvar uncrustify--ununcrustified-files 0
+  "The nbumber of files which have not yet been uncrustified by
+  `uncrustify-directory'. If this is > 0 we may not start a new
+  `uncrustify-directory' run.")
 
 
 (defun uncrustify-directory (dir &optional only-check)
@@ -169,9 +182,9 @@ With non-nil prefix argument, only check, do not overwrite."
   (interactive "DDirectory: \nP")
   (unless uncrustify-config-file (error "uncrustify-config-file not set"))
   (unless uncrustify-files-regexp (error "uncrustify-files-regexp not set"))
-  (when only-check (uncrustify--check-header dir))
   (let ((files
          (find-lisp-find-files dir uncrustify-files-regexp)))
+    (when only-check (setq uncrustify--ununcrustified-files (length files)))
     (mapc (lambda (file) (uncrustify--file-internal file only-check)) files))
   (when (and uncrustify-pop-to-check-buffer only-check)
     (pop-to-buffer uncrustify-check-buffer)))
@@ -190,17 +203,6 @@ With non-nil prefix argument, only check, do not overwrite."
     (uncrustify-directory root only-check)))
 
 
-(defun uncrustify-file (file &optional only-check)
-  "Uncrustify a single file.
-
-With non-nil prefix argument, only check, do not overwrite."
-  (interactive "ffile: \nP")
-  (when only-check (uncrustify--check-header file))
-  (uncrustify--file-internal file only-check)
-  (when (and uncrustify-pop-to-check-buffer only-check)
-    (pop-to-buffer uncrustify-check-buffer)))
-
-
 (defmacro uncrustify--with-unlocked-buffer (&rest body)
   "Run BODY in the current buffer (which is assumed to be the uncrustify check
   buffer) with read only mode disabled. Puts point at `point-max'."
@@ -212,7 +214,7 @@ With non-nil prefix argument, only check, do not overwrite."
      (goto-char (point-max))))
 
 
-(defun uncrustify--xpunge-passed ()
+(defun uncrustify-xpunge-passed ()
   "Remove all files that passed."
   (interactive)
   (uncrustify--with-unlocked-buffer
@@ -221,7 +223,7 @@ With non-nil prefix argument, only check, do not overwrite."
      (delete-matching-lines ".*: PASS$"))))
 
 
-(defun uncrustify--rerun-file ()
+(defun uncrustify-rerun-file ()
   "Re-run uncrustify on the file at point, temporarily binding
 `uncrustify-clear-buffer-each-run to nil and with ONLY-CHECK non-nil."
   (interactive)
@@ -232,12 +234,17 @@ With non-nil prefix argument, only check, do not overwrite."
       (user-error "No filename at point"))))
 
 
-(define-derived-mode uncrustify-check-mode fundamental-mode
+(define-derived-mode uncrustify-check-mode tabulated-list-mode
   "Uncrustify-Check"
   "A major mode for the `uncrustify-check-buffer'."
   :group 'uncrustify
-  (define-key uncrustify-check-mode-map "n" 'next-line)
-  (define-key uncrustify-check-mode-map "p" 'previous-line)
+
+  (setq tabulated-list-format
+        [("File" 25 nil . nil) ("Status" 7 nil . nil)])
+  (tabulated-list-init-header)
+  (setq tabulated-list-revert-hook 'uncrustify-revert-buffer)
+  
   (define-key uncrustify-check-mode-map "r" 'uncrustify--rerun-file)
-  (define-key uncrustify-check-mode-map "q" 'bury-buffer)
   (define-key uncrustify-check-mode-map "x" 'uncrustify--xpunge-passed))
+
+;; uncrustify.el ends here... just kidding, it actually ends here
